@@ -23,7 +23,7 @@ def whittaker_als_baseline(y, lam=1e4, p=0.01, max_iter=15):
 
 
 
-def segment_blobs(M, f_M, f_int, factor_high=3, factor_low=2, average='mean', lam=1e4, p=0.01, max_iter=15, method = 'baseline'):
+def segment_blobs(M, f_M, f_int, factor_high=3, factor_low=2, average='mean', lam=1e2, p=0.01, max_iter=15, method = 'baseline'):
     '''
     Inputs:
     - M: spectrogram matrix

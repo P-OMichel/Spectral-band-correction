@@ -580,3 +580,261 @@ for ax, data, title in panels_hybrid:
 
 fig.colorbar(pcm, ax=axes.ravel().tolist(), orientation='horizontal', pad=0.06)
 plt.show()
+
+
+# ==============================================================================
+# --- Local Inversion Analysis & Ordering Feature Maps
+# ==============================================================================
+from scipy.stats import kendalltau
+
+
+def compute_inversion_map(I_before, I_after, eval_mask):
+  """Computes local edge inversions on 4-connected neighbors within/across eval_mask.
+
+  Returns:
+      inversion_count_map (2D array): Number of inverted edges per pixel.
+      inversion_rate (float): Fraction of inverted edges over active edges.
+  """
+  ny, nx = I_before.shape
+  inv_count = np.zeros((ny, nx), dtype=float)
+  total_edges = 0
+  inverted_edges = 0
+
+  # Horizontal neighbor pairs (r, c) <-> (r, c + 1)
+  mask_h = eval_mask[:, :-1] | eval_mask[:, 1:]
+  diff_orig_h = I_before[:, 1:] - I_before[:, :-1]
+  diff_corr_h = I_after[:, 1:] - I_after[:, :-1]
+
+  # Inversion occurs when the non-zero sign flips
+  inv_h = (
+      (diff_orig_h * diff_corr_h < -1e-9)
+      & (np.abs(diff_orig_h) > 1e-6)
+      & mask_h
+  )
+
+  inv_count[:, :-1] += inv_h
+  inv_count[:, 1:] += inv_h
+  inverted_edges += np.sum(inv_h)
+  total_edges += np.sum(mask_h & (np.abs(diff_orig_h) > 1e-6))
+
+  # Vertical neighbor pairs (r, c) <-> (r + 1, c)
+  mask_v = eval_mask[:-1, :] | eval_mask[1:, :]
+  diff_orig_v = I_before[1:, :] - I_before[:-1, :]
+  diff_corr_v = I_after[1:, :] - I_after[:-1, :]
+
+  inv_v = (
+      (diff_orig_v * diff_corr_v < -1e-9)
+      & (np.abs(diff_orig_v) > 1e-6)
+      & mask_v
+  )
+
+  inv_count[:-1, :] += inv_v
+  inv_count[1:, :] += inv_v
+  inverted_edges += np.sum(inv_v)
+  total_edges += np.sum(mask_v & (np.abs(diff_orig_v) > 1e-6))
+
+  inv_rate = (inverted_edges / total_edges) if total_edges > 0 else 0.0
+  return inv_count, inv_rate
+
+
+# Dictionary of methods to test
+methods = {
+    'Direct ECDF': I_ecdf_ext,
+    'Alpha ECDF': I_alpha_ext,
+    'Soft Knee': I_knee_ext,
+    'Poisson (alpha=0.5)': I_poisson_ext,
+    'ECDF-Guided Poisson': I_poisson_ecdf_guided,
+    'Distance-Adaptive Poisson': I_poisson_adaptive,
+}
+
+# ------------------------------------------------------------------------------
+# Visualization: Local Inversion Heatmaps
+# ------------------------------------------------------------------------------
+fig, axes = plt.subplots(3, 2, figsize=(15, 10), constrained_layout=True)
+axes = axes.ravel()
+
+# Downsample for faster Kendall tau calculation if mask is very large
+eval_indices = np.where(target_mask)
+step = max(1, len(eval_indices[0]) // 4000)
+orig_sample = I_orig[eval_indices][::step]
+
+for idx, (name, I_corr) in enumerate(methods.items()):
+  ax = axes[idx]
+  inv_map, inv_rate = compute_inversion_map(I_orig, I_corr, target_mask)
+
+  corr_sample = I_corr[eval_indices][::step]
+  tau, _ = kendalltau(orig_sample, corr_sample)
+
+  # Mask unanalyzed regions for display
+  inv_map_display = np.ma.masked_where(~target_mask, inv_map)
+
+  pcm = ax.pcolormesh(
+      t_spectro,
+      f_M,
+      inv_map_display,
+      shading='nearest',
+      cmap='magma',
+      vmin=0,
+      vmax=4,
+  )
+  ax.contour(t_spectro, f_M, seg_bool, colors='cyan', linewidths=0.6)
+  ax.contour(
+      t_spectro,
+      f_M,
+      target_mask,
+      colors='white',
+      linewidths=0.5,
+      linestyles='--',
+  )
+
+  ax.set_title(
+      f'{name}\nInverted Edges: {inv_rate*100:.2f}% | Kendall $\\tau$: {tau:.3f}',
+      fontsize=9,
+  )
+  ax.set_ylabel('Freq (Hz)')
+  ax.sharex(axes[0])
+
+cbar = fig.colorbar(
+    pcm, ax=axes.tolist(), orientation='horizontal', pad=0.05, shrink=0.6
+)
+cbar.set_label(
+    'Inverted Neighbor Count per Pixel (0 = fully preserved, 4 = complete local'
+    ' inversion)'
+)
+plt.show()
+
+
+# ==============================================================================
+# --- Inversion-Free Strong Attenuation Methods
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Method A: Monotonic Boundary-Anchored ECDF
+# ------------------------------------------------------------------------------
+# Reference anchor: minimum value along the extended mask edge
+T_anchor = np.min(spectro_log[outer_ring])
+
+# ECDF mapping strictly shifted so f(T_anchor) == T_anchor
+raw_mapped = ecdf_map_ext(ext_inside_raw)
+anchor_mapped = ecdf_map_ext(np.array([T_anchor]))[0]
+
+# Rescale positive excursions from the anchor
+gamma_scale = 0.85  # controls strength of reduction
+mono_ecdf_vals = ext_inside_raw.copy()
+above_anchor = ext_inside_raw > T_anchor
+mono_ecdf_vals[above_anchor] = T_anchor + gamma_scale * np.maximum(
+    0.0, raw_mapped[above_anchor] - anchor_mapped
+)
+
+I_mono_ecdf = I_orig.copy()
+I_mono_ecdf[target_mask] = mono_ecdf_vals
+
+
+# ------------------------------------------------------------------------------
+# Method B: Strong C1-Smooth Logarithmic Compression
+# ------------------------------------------------------------------------------
+# Set threshold at 50th percentile (median) of outer background
+T_log = np.median(ext_outside_vals)
+beta_param = (
+    np.std(ext_outside_vals) * 0.8
+)  # smaller beta = stronger reduction
+
+I_strong_log = I_orig.copy()
+compress_mask = target_mask & (I_orig > T_log)
+I_strong_log[compress_mask] = T_log + beta_param * np.log(
+    1.0 + (I_orig[compress_mask] - T_log) / beta_param
+)
+
+
+# ------------------------------------------------------------------------------
+# Inversion & Visual Verification
+# ------------------------------------------------------------------------------
+comp_methods = {
+    'Alpha ECDF (Baseline)': I_alpha_ext,
+    'Monotonic Anchored ECDF': I_mono_ecdf,
+    'Strong Log-Compressor': I_strong_log,
+}
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 4.5), constrained_layout=True)
+
+for ax, (name, I_corr) in zip(axes, comp_methods.items()):
+  inv_map, inv_rate = compute_inversion_map(I_orig, I_corr, target_mask)
+  corr_sample = I_corr[eval_indices][::step]
+  tau, _ = kendalltau(orig_sample, corr_sample)
+
+  inv_display = np.ma.masked_where(~target_mask, inv_map)
+  pcm = ax.pcolormesh(
+      t_spectro, f_M, inv_display, shading='nearest', cmap='magma', vmin=0, vmax=4
+  )
+  ax.contour(t_spectro, f_M, seg_bool, colors='cyan', linewidths=0.6)
+  ax.contour(
+      t_spectro,
+      f_M,
+      target_mask,
+      colors='white',
+      linewidths=0.5,
+      linestyles='--',
+  )
+
+  ax.set_title(
+      f'{name}\nInversions: {inv_rate*100:.2f}% | Kendall $\\tau$: {tau:.3f}',
+      fontsize=10,
+  )
+  ax.set_ylabel('Freq (Hz)')
+  ax.sharex(axes[0])
+
+cbar = fig.colorbar(pcm, ax=axes.tolist(), orientation='horizontal', pad=0.08)
+cbar.set_label('Inverted Neighbor Count per Pixel')
+plt.show()
+
+
+# ==============================================================================
+# --- Visual Comparison: Corrected Spectrograms vs. Original
+# ==============================================================================
+fig, axes = plt.subplots(2, 2, figsize=(15, 8), constrained_layout=True)
+
+panels_compare = [
+    (axes[0, 0], I_orig, "Original Spectrogram (> 20 Hz)"),
+    (axes[0, 1], I_alpha_ext, "Alpha-blended Local ECDF (Reference Baseline)"),
+    (
+        axes[1, 0],
+        I_mono_ecdf,
+        "Monotonic Anchored ECDF (Inversion-Free & Strong Attenuation)",
+    ),
+    (
+        axes[1, 1],
+        I_strong_log,
+        f"Strong C1-Smooth Log-Compressor (Beta={beta_param:.2f}, Strict Tau=1.0)",
+    ),
+]
+
+for ax, data, title in panels_compare:
+  pcm = ax.pcolormesh(
+      t_spectro, f_M, data, shading="nearest", cmap="jet", vmin=vmin, vmax=vmax
+  )
+  # Cyan: Core detected blob contour; White dashed: Extended mask border
+  ax.contour(t_spectro, f_M, seg_bool, colors="cyan", linewidths=0.7)
+  ax.contour(
+      t_spectro,
+      f_M,
+      target_mask,
+      colors="white",
+      linewidths=0.6,
+      linestyles="--",
+  )
+  ax.set_title(title, fontsize=10)
+  ax.set_ylabel("Freq (Hz)")
+  ax.sharex(axes[0, 0])
+
+axes[1, 0].set_xlabel("Time (s)")
+axes[1, 1].set_xlabel("Time (s)")
+
+fig.colorbar(
+    pcm,
+    ax=axes.ravel().tolist(),
+    orientation="horizontal",
+    pad=0.06,
+    shrink=0.7,
+    label="Log2 Power Intensity",
+)
+plt.show()

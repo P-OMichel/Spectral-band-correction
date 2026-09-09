@@ -1,6 +1,4 @@
-"""Segmentation and Alpha-Blended ECDF Correction of Spectral Signatures.
-
-Comparison of Standard Mask vs. Extended Mask correction with ECDF analysis.
+"""Segmentation and ECDF knee Correction of Spectral Signatures.
 """
 
 from Functions.generate_OU import get_mixed_OU_signals
@@ -9,7 +7,7 @@ from Functions.time_frequency import spectrogram
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import binary_dilation
-from Functions.correct_spectrogram import apply_alpha_blended_ecdf
+from Functions.correct_spectrogram import apply_monotonic_floor_sigmoid, correct_by_logit_anchored_sigmoid
 from Functions.utils import get_ecdf, compute_sef95
 
 
@@ -40,26 +38,21 @@ I_orig = spectro_log.copy()
 
 # --- Segmentation of the pixels to correct
 f_int = [25, 35]
-seg_mask, psd, baseline, T_low, T_high = segment_blobs(M, f_M, f_int)
+seg_mask, psd, baseline, T_low, T_high = segment_blobs(M, f_M, f_int, factor_high=2, factor_low=1.5)
 seg_bool = seg_mask.astype(bool)
 # Extended mask via morphological dilation (2 iterations)
 expanded_mask = binary_dilation(seg_bool, iterations=2)
 
-# --- Corrections
-# Apply to standard mask
-I_alpha_std, ref_vals_std = apply_alpha_blended_ecdf(I_orig, seg_bool, dilation_iter=2, alpha_cutoff=0.75)
-
-# Apply to extended mask
-I_alpha_ext, ref_vals_ext = apply_alpha_blended_ecdf(I_orig, expanded_mask, dilation_iter=2, alpha_cutoff=0.80)
+# --- Correction
+I_out, ref_vals = apply_monotonic_floor_sigmoid(I_orig, seg_bool)
+I_out, I_mono, ref_vals = correct_by_logit_anchored_sigmoid(I_orig, seg_bool)
 
 # --- Compute ECDFs
 x_in, y_in = get_ecdf(I_orig[seg_bool])
-x_std, y_std = get_ecdf(I_alpha_std[seg_bool])
-x_ext, y_ext = get_ecdf(I_alpha_ext[seg_bool])
-
+x_out, y_out = get_ecdf(I_out[seg_bool])
+x_mono, y_mono = get_ecdf(I_mono[seg_bool])
 # Both reference distributions
-x_ref_std, y_ref_std = get_ecdf(ref_vals_std)
-x_ref_ext, y_ref_ext = get_ecdf(ref_vals_ext)
+x_ref_out, y_ref_out = get_ecdf(ref_vals)
 
 
 # --- Display Spectrogram corrections
@@ -68,8 +61,7 @@ vmin = np.percentile(I_orig, 5)
 vmax = np.percentile(I_orig, 99.5)
 plot_configs = [
     (axes[0],I_orig,'Original Spectrogram (≥ 20 Hz)',seg_bool,None),
-    (axes[1],I_alpha_std,'Alpha-Blended ECDF Correction (Standard Mask)',seg_bool,None),
-    (axes[2],I_alpha_ext,'Alpha-Blended ECDF Correction (Extended Mask)',seg_bool,expanded_mask),
+    (axes[1],I_out,'Alpha-Blended ECDF Correction (Standard Mask)',seg_bool,None),
 ]
 
 for ax, data, title, c_mask, ext_c_mask in plot_configs:
@@ -82,19 +74,23 @@ for ax, data, title, c_mask, ext_c_mask in plot_configs:
   ax.set_title(title, fontsize=11)
   ax.set_ylabel('Frequency (Hz)')
   ax.sharex(axes[0])
-axes[2].set_xlabel('Time (s)')
+axes[1].set_xlabel('Time (s)')
 cbar = fig.colorbar(pcm, ax=axes, orientation='vertical', pad=0.02, fraction=0.04, label=r'$\log_2(\text{Power})$')
+
+axes[2].plot(np.mean(I_orig, axis = -1))
+axes[2].plot(np.mean(I_out, axis = -1))
+axes[2].plot(np.mean(I_mono, axis = -1))
+
 plt.show()
 
 
 # --- Display ECDFs
 fig, ax = plt.subplots(figsize=(8.5, 5), constrained_layout=True)
 
-ax.plot(x_ref_std,y_ref_std,color='gray',linestyle=':',linewidth=2.0,label='Reference Ring (Standard Mask)')
-ax.plot(x_ref_ext,y_ref_ext,color='black',linestyle='--',linewidth=2.0,label='Reference Ring (Extended Mask)')
+ax.plot(x_ref_out,y_ref_out,color='gray',linestyle=':',linewidth=2.0,label='Reference Ring (Standard Mask)')
 ax.plot(x_in, y_in, 'r-', linewidth=2.0, label='Original Inside Blobs')
-ax.plot(x_std,y_std,color='tab:orange',linestyle='-',linewidth=1.8,label='Corrected: Alpha-Blended (Standard Mask)')
-ax.plot(x_ext,y_ext,color='tab:blue',linestyle='-',linewidth=1.8,label='Corrected: Alpha-Blended (Extended Mask)')
+ax.plot(x_out,y_out,color='tab:blue',linestyle='-',linewidth=1.8,label='Corrected: monotonic floor sigmoid')
+ax.plot(x_mono,y_mono,color='tab:blue',linestyle='-',linewidth=1.8,label='Corrected: monotonic floor')
 
 ax.set_title('ECDF Comparison Inside Detected Blobs', fontsize=12, fontweight='bold')
 ax.set_xlabel(r'Intensity ($\log_2\text{ Power}$)', fontsize=11)
@@ -103,7 +99,6 @@ ax.grid(True, linestyle='--', alpha=0.5)
 ax.legend(loc='lower right', frameon=True, fontsize=10)
 
 plt.show()
-
 
 
 
@@ -144,7 +139,7 @@ for k, f_val in enumerate(factors):
 
   # Apply correction using Extended Mask
   if np.any(expanded_mask_k):
-    I_corr_eval, _ = apply_alpha_blended_ecdf(I_orig_eval, expanded_mask_k, dilation_iter=2, alpha_cutoff=0.80)
+    I_corr_eval, _ = apply_monotonic_floor_sigmoid(I_orig_eval, expanded_mask_k)
   else:
     I_corr_eval = I_orig_eval.copy()
 

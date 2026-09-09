@@ -7,8 +7,7 @@ import matplotlib.pyplot as plt
 from Functions.generate_OU import get_mixed_OU_signals
 from Functions.time_frequency import spectrogram
 from Functions.segment_spectrogram import segment_blobs
-from scipy.ndimage import binary_dilation, label
-from sklearn.isotonic import IsotonicRegression
+from scipy.ndimage import binary_dilation
 
 # ====================== Simulate EEG Signal with ketamine signature =================
 # --- Parameters
@@ -91,9 +90,9 @@ plt.legend()
 plt.grid(True)
 plt.show()
 
-# ================================#
+# ================================
 # --- Get neighboring set & Strategy 1
-# ================================#
+# ================================
 
 # --- 1. Prepare Data & Masks ---
 spectro_log = np.log2(M + 1e-11)
@@ -224,125 +223,6 @@ plt.show()
 
 plt.show()
 
-'''
-# ================== Correct spectrogram (Strategy 2: Time-Local Monotonic Floor) ===============
-
-# --- 1. Initialize Arrays ---
-corrected_monotonic_log = spectro_log.copy()
-
-# Label distinct connected components (blobs)
-labeled_mask, num_blobs = label(seg_bool, structure=np.ones((3, 3)))
-
-# --- 2. Minimal ECDF Projection Blob-by-Blob ---
-for blob_id in range(1, num_blobs + 1):
-    blob_idx = (labeled_mask == blob_id)
-    
-    # Extract 2-bin local border ring specifically for THIS blob
-    blob_expanded = binary_dilation(blob_idx, iterations=2)
-    blob_border = blob_expanded & ~blob_idx
-    
-    if not np.any(blob_border):
-        continue
-
-    # A. Extract Exact Maximum Local Border Floor in 2D Space (Time + Frequency)
-    blob_coords = np.argwhere(blob_idx)
-    raw_vals = spectro_log[blob_idx]
-    
-    pixel_floors = []
-    for f_i, t_i in blob_coords:
-        # 3x3 time-frequency neighborhood in the border
-        f_min, f_max = max(0, f_i - 2), min(spectro_log.shape[0], f_i + 3)
-        t_min, t_max = max(0, t_i - 2), min(spectro_log.shape[1], t_i + 3)
-        
-        local_border_window = blob_border[f_min:f_max, t_min:t_max]
-        local_spectro_window = spectro_log[f_min:f_max, t_min:t_max]
-        
-        border_vals_in_win = local_spectro_window[local_border_window]
-        
-        if len(border_vals_in_win) > 0:
-            # Use exact max to respect the boundary constraint
-            pixel_floors.append(np.max(border_vals_in_win))
-        else:
-            border_at_f = spectro_log[f_i, :][blob_border[f_i, :]]
-            pixel_floors.append(np.max(border_at_f) if len(border_at_f) > 0 else np.max(spectro_log[blob_border]))
-
-    pixel_floors = np.array(pixel_floors)
-
-    # B. Enforce Constraint: Inside Pixel >= Local Neighbor Floor
-    # (Attenuates peaks towards the local border floor, but never below it)
-    sort_idx = np.argsort(raw_vals)
-    sorted_raw = raw_vals[sort_idx]
-    sorted_floors = pixel_floors[sort_idx]
-
-    # C. Compute Minimal Monotonic Sequence
-    # Guarantees rank monotonicity AND that inside values >= local border max
-    min_rank_vals = np.maximum.accumulate(sorted_floors)
-
-    # Cap at raw values to ensure attenuation only (no accidental amplification)
-    min_rank_vals = np.minimum(min_rank_vals, sorted_raw)
-    
-    # Final monotonic sweep
-    min_rank_vals = np.maximum.accumulate(min_rank_vals)
-
-    # D. Remap Back to Spatial Positions
-    remapped_blob = np.empty_like(min_rank_vals)
-    remapped_blob[sort_idx] = min_rank_vals
-    corrected_monotonic_log[blob_idx] = remapped_blob
-
-# Extract sorted array for strategy 2 ECDF plotting
-monotonic_inside_vals = np.sort(corrected_monotonic_log[seg_bool])
-
-# --- Figure 3: Diagnostic Subplots & ECDF (Strategy 2) ---
-fig3, axes3 = plt.subplots(4, 1, figsize=(10, 10), constrained_layout=True)
-
-axes3[0].pcolormesh(t_spectro, f_M, spectro_log, shading='nearest', cmap='jet')
-axes3[0].set_title('Spectrogram (log2 intensity)')
-axes3[0].set_ylabel('Frequency (Hz)')
-
-axes3[1].pcolormesh(t_spectro, f_M, seg_bool, shading='nearest', cmap='binary')
-axes3[1].set_title('Original Segmented Mask')
-axes3[1].set_ylabel('Frequency (Hz)')
-
-axes3[2].pcolormesh(t_spectro, f_M, mask_display, shading='nearest', cmap='Blues')
-axes3[2].set_title('Expanded Mask (Dark Blue) & Border Ring (Light Blue)')
-axes3[2].set_ylabel('Frequency (Hz)')
-
-axes3[3].plot(local_outside_vals, y_local_outside, label='Outside (within 2 bins)', color='black')
-axes3[3].plot(inside_vals, y_inside, label='Original Inside Mask', color='red', linestyle='--')
-axes3[3].plot(monotonic_inside_vals, y_inside, label='Corrected Inside Mask (Time-Local Monotonic Floor)', color='purple')
-axes3[3].axvline(max_outside_val, color='gray', linestyle=':', label='Max Outside Threshold')
-axes3[3].axvline(log2_T_low_max, color='orange', linestyle='--', label='T_low Threshold (Max)')
-axes3[3].set_xlabel('Log Spectrogram Intensity')
-axes3[3].set_ylabel('ECDF')
-axes3[3].set_title('ECDF Matching & Transformation (Isotonic Projection)')
-axes3[3].legend()
-axes3[3].grid(True)
-
-plt.show()
-
-# --- Figure 4: Original vs. Corrected Spectrogram (Monotonic Floor Strategy) ---
-fig4, axes4 = plt.subplots(2, 1, figsize=(10, 6), sharex=True, sharey=True, constrained_layout=True)
-
-vmin_m = min(spectro_log.min(), corrected_monotonic_log.min())
-vmax_m = max(spectro_log.max(), corrected_monotonic_log.max())
-
-pcm_orig4 = axes4[0].pcolormesh(t_spectro, f_M, spectro_log, shading='nearest', cmap='jet', vmin=vmin_m, vmax=vmax_m)
-axes4[0].contour(t_spectro, f_M, seg_bool, colors='white', linewidths=1.2, linestyles='--')
-axes4[0].contour(t_spectro, f_M, expanded_mask, colors='black', linewidths=1.2, linestyles='--')
-axes4[0].set_title('Original Spectrogram (with Mask Contour)')
-axes4[0].set_ylabel('Frequency (Hz)')
-fig4.colorbar(pcm_orig4, ax=axes4[0], label='Log Intensity')
-
-pcm_corr4 = axes4[1].pcolormesh(t_spectro, f_M, corrected_monotonic_log, shading='nearest', cmap='jet', vmin=vmin_m, vmax=vmax_m)
-axes4[1].contour(t_spectro, f_M, seg_bool, colors='white', linewidths=1.2, linestyles='--')
-axes4[1].contour(t_spectro, f_M, expanded_mask, colors='black', linewidths=1.2, linestyles='--')
-axes4[1].set_title('Corrected Spectrogram (Isotonic Monotonic Floor Projection)')
-axes4[1].set_xlabel('Time (s)')
-axes4[1].set_ylabel('Frequency (Hz)')
-fig4.colorbar(pcm_corr4, ax=axes4[1], label='Log Intensity')
-
-plt.show()
-'''
 
 # ================== Correct spectrogram (Strategy 2: Single Global Sigmoid Fit) ===============
 

@@ -17,5 +17,6 @@ def spectrogram(y,fs,nperseg_factor=1,noverlap_factor=0.9,nfft_factor=1,detrend=
         j = max(1, min(j, len(f_spectro)))
         f_spectro = f_spectro[:j]
         Sxx = Sxx[:j, :]
+        stft = stft[:j, :]
 
-    return f_spectro, t_spectro, Sxx
+    return f_spectro, t_spectro, Sxx, stft

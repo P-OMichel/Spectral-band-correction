@@ -158,7 +158,7 @@ def plot_spatial_distance_analysis(I_in, mask, vmin, vmax, alpha_cutoff=0.8, zoo
     return fig
 
 # --- generate synthetic signal
-T = 20  # Duration (s)
+T = 10  # Duration (s)
 dt = 0.001
 fs = 1 / dt
 
@@ -169,7 +169,7 @@ factor_list = [1, 1, 1]
 
 t, y = get_mixed_OU_signals(T, dt, lbda_list, omega_list, sigma_list, factor_list)
 
-f_spectro, t_spectro, spectro = spectrogram(y, fs, nfft_factor=2)
+f_spectro, t_spectro, spectro = spectrogram(y, fs, nfft_factor=2)[:3]
 
 # Focus strictly on frequencies >= 20 Hz
 mask_f = f_spectro >= 20
@@ -189,6 +189,37 @@ border_ring = ref_mask & ~expanded_mask
 
 
 
+
+# --- Display Segmentation Steps + ECDF + M_in + M_in-->out
+
+x_in, y_in = get_ecdf(I_orig[expanded_mask])
+x_ref, y_ref = get_ecdf(I_orig[border_ring])
+
+shade_opacity = 0.65  # 0.0 = fully clear, 1.0 = fully opaque
+overlay = np.zeros((*expanded_mask.shape, 4), dtype=float)
+overlay[~expanded_mask] = [0.0, 0.0, 0.0, shade_opacity]
+
+I_in_out = get_ecdf_mapped_matrices(I_orig, expanded_mask)
+
+# 1 row, 5 subplots to accommodate both mask representations cleanly
+fig, axes = plt.subplots(1, 2, figsize=(26, 5), constrained_layout=True)
+vmin = np.percentile(I_orig, 5)
+vmax = np.percentile(I_orig, 99.5)
+
+# --- 1. Spectrogram + Target Mask Only ---
+axes[0].pcolormesh(t_spectro, f_M, I_orig, shading='nearest', cmap='jet', vmin=vmin, vmax=vmax)
+c_mask1 = axes[0].contour(t_spectro, f_M, expanded_mask, levels=[0.5], colors='black', linewidths=3.0)
+axes[0].set_title(r'Masked Blobs', fontsize=16, fontweight='bold')
+axes[0].set_ylabel('Frequency (Hz)', fontsize=14)
+axes[0].set_xlabel('Time (s)', fontsize=12)
+
+# --- 2. Spectrogram + Target Mask + Reference Ring ---
+axes[1].pcolormesh(t_spectro, f_M, I_orig, shading='nearest', cmap='jet', vmin=vmin, vmax=vmax)
+c_mask2 = axes[1].contour(t_spectro, f_M, expanded_mask, levels=[0.5], colors='black', linewidths=3.0, linestyles='--')
+c_ref = axes[1].contour(t_spectro, f_M, ref_mask, levels=[0.5], colors='black', linewidths=3.0, linestyles='--')
+
+
+plt.show()
 
 
 # --- Display Segmentation + M_in + M_in-->out
